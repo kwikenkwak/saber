@@ -147,6 +147,9 @@ class EditorHistoryItem {
     this.page,
     this.quillChange,
     this.colorChange,
+    this.insertedPages,
+    this.oldBackgrounds,
+    this.newBackgrounds,
   }) : assert(
          type != .move || offset != null,
          'Offset must be provided for move',
@@ -170,6 +173,10 @@ class EditorHistoryItem {
        assert(
          type != .changeColor || colorChange?.length == strokes.length,
          'colorChange must be provided and contain each of strokes',
+       ),
+       assert(
+         type != .changeBackgrounds || (oldBackgrounds != null && newBackgrounds != null),
+         'Backgrounds must be provided for changeBackgrounds',
        );
 
   final EditorHistoryItemType type;
@@ -180,6 +187,9 @@ class EditorHistoryItem {
   final EditorPage? page;
   final DocChange? quillChange;
   final Map<Stroke, ColorChange>? colorChange;
+  final List<EditorPage>? insertedPages;
+  final Map<int, EditorImage?>? oldBackgrounds;
+  final Map<int, EditorImage?>? newBackgrounds;
 
   EditorHistoryItem copyWith({
     EditorHistoryItemType? type,
@@ -190,6 +200,9 @@ class EditorHistoryItem {
     EditorPage? page,
     DocChange? quillChange,
     Map<Stroke, ColorChange>? colorChange,
+    List<EditorPage>? insertedPages,
+    Map<int, EditorImage?>? oldBackgrounds,
+    Map<int, EditorImage?>? newBackgrounds,
   }) {
     return EditorHistoryItem(
       type: type ?? this.type,
@@ -200,6 +213,9 @@ class EditorHistoryItem {
       page: page ?? this.page,
       quillChange: quillChange ?? this.quillChange,
       colorChange: colorChange ?? this.colorChange,
+      insertedPages: insertedPages ?? this.insertedPages,
+      oldBackgrounds: oldBackgrounds ?? this.oldBackgrounds,
+      newBackgrounds: newBackgrounds ?? this.newBackgrounds,
     );
   }
 }
@@ -213,4 +229,5 @@ enum EditorHistoryItemType {
   quillChange,
   quillUndoneChange,
   changeColor,
+  changeBackgrounds,
 }

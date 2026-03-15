@@ -10,6 +10,7 @@ import 'package:saber/components/canvas/_stroke.dart';
 import 'package:saber/components/canvas/canvas_preview.dart';
 import 'package:saber/components/canvas/inner_canvas.dart';
 import 'package:saber/data/editor/editor_core_info.dart';
+import 'package:saber/data/prefs.dart';
 import 'package:screenshot/screenshot.dart';
 
 abstract class EditorExporter {
@@ -25,8 +26,9 @@ abstract class EditorExporter {
 
   static Future<pw.Document> generatePdf(
     EditorCoreInfo coreInfo,
-    BuildContext context,
-  ) async {
+    BuildContext context, {
+    void Function(int current, int total)? onProgress,
+  }) async {
     if (coreInfo.pages.isNotEmpty && coreInfo.pages.last.isEmpty) {
       // don't export the empty last page
       coreInfo = coreInfo.copyWith(
@@ -35,94 +37,107 @@ abstract class EditorExporter {
     }
 
     final pdf = pw.Document();
-    final screenshotController = ScreenshotController();
 
-    // screenshot each page
-    final pageScreenshots = await Future.wait(
-      List.generate(
-        coreInfo.pages.length,
-        (pageIndex) => screenshotPage(
-          coreInfo: coreInfo,
-          pageIndex: pageIndex,
-          screenshotController: screenshotController,
-        ),
-      ),
-    );
+    onProgress?.call(0, coreInfo.pages.length);
 
-    for (int pageIndex = 0; pageIndex < pageScreenshots.length; ++pageIndex) {
-      final page = coreInfo.pages[pageIndex];
-      final pageSize = page.size;
-      pdf.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat(pageSize.width, pageSize.height),
-          build: (pw.Context context) {
-            return pw.SizedBox(
-              width: pageSize.width,
-              height: pageSize.height,
-              child: pw.CustomPaint(
-                foregroundPainter: (PdfGraphics pdfGraphics, PdfPoint size) {
-                  final backgroundColor = PdfColor.fromInt(
-                    coreInfo.backgroundColor?.toARGB32() ??
-                        InnerCanvas.defaultBackgroundColor.toARGB32(),
-                  ).flatten();
+    final int concurrency = stows.exportParallelism.value.clamp(1, 20);
 
-                  final strokes = page.strokes.where(
-                    (stroke) => !shouldRasterizeStroke(stroke),
-                  );
-                  for (final stroke in strokes) {
-                    final strokeColor = PdfColor.fromInt(
-                      stroke.color.toARGB32(),
-                    ).flatten(background: backgroundColor);
+    // Group screenshots by concurrency setting to balance memory and speed
+    for (int chunkStart = 0; chunkStart < coreInfo.pages.length; chunkStart += concurrency) {
+      final chunkEnd = (chunkStart + concurrency < coreInfo.pages.length)
+          ? chunkStart + concurrency
+          : coreInfo.pages.length;
 
-                    /// Whether we need to fill the shape, or draw its stroke
-                    final bool shouldFillShape;
-                    if (stroke is CircleStroke) {
-                      shouldFillShape = false;
-                      pdfGraphics.drawEllipse(
-                        stroke.center.dx,
-                        pageSize.height - stroke.center.dy,
-                        stroke.radius,
-                        stroke.radius,
-                        clockwise: false,
-                      );
-                    } else if (stroke is RectangleStroke) {
-                      shouldFillShape = false;
-                      final strokeSize = stroke.options.size;
-                      pdfGraphics.drawRRect(
-                        stroke.rect.left,
-                        pageSize.height - stroke.rect.bottom,
-                        stroke.rect.width,
-                        stroke.rect.height,
-                        strokeSize / 4,
-                        strokeSize / 4,
-                      );
-                    } else {
-                      shouldFillShape = true;
-                      pdfGraphics.drawShape(stroke.toSvgPath());
+      final chunkScreenshots = await Future.wait([
+        for (int pageIndex = chunkStart; pageIndex < chunkEnd; ++pageIndex)
+          screenshotPage(
+            coreInfo: coreInfo,
+            pageIndex: pageIndex,
+            screenshotController: ScreenshotController(), // New instance per concurrent task
+          ),
+      ]);
+
+      for (int i = 0; i < chunkScreenshots.length; ++i) {
+        final pageIndex = chunkStart + i;
+        final screenshot = chunkScreenshots[i];
+        final page = coreInfo.pages[pageIndex];
+        final pageSize = page.size;
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat(pageSize.width, pageSize.height),
+            build: (pw.Context context) {
+              return pw.SizedBox(
+                width: pageSize.width,
+                height: pageSize.height,
+                child: pw.CustomPaint(
+                  foregroundPainter: (PdfGraphics pdfGraphics, PdfPoint size) {
+                    final backgroundColor = PdfColor.fromInt(
+                      coreInfo.backgroundColor?.toARGB32() ??
+                          InnerCanvas.defaultBackgroundColor.toARGB32(),
+                    ).flatten();
+
+                    final strokes = page.strokes.where(
+                      (stroke) => !shouldRasterizeStroke(stroke),
+                    );
+                    for (final stroke in strokes) {
+                      final strokeColor = PdfColor.fromInt(
+                        stroke.color.toARGB32(),
+                      ).flatten(background: backgroundColor);
+
+                      /// Whether we need to fill the shape, or draw its stroke
+                      final bool shouldFillShape;
+                      if (stroke is CircleStroke) {
+                        shouldFillShape = false;
+                        pdfGraphics.drawEllipse(
+                          stroke.center.dx,
+                          pageSize.height - stroke.center.dy,
+                          stroke.radius,
+                          stroke.radius,
+                          clockwise: false,
+                        );
+                      } else if (stroke is RectangleStroke) {
+                        shouldFillShape = false;
+                        final strokeSize = stroke.options.size;
+                        pdfGraphics.drawRRect(
+                          stroke.rect.left,
+                          pageSize.height - stroke.rect.bottom,
+                          stroke.rect.width,
+                          stroke.rect.height,
+                          strokeSize / 4,
+                          strokeSize / 4,
+                        );
+                      } else {
+                        shouldFillShape = true;
+                        pdfGraphics.drawShape(stroke.toSvgPath());
+                      }
+
+                      if (shouldFillShape) {
+                        // fill
+                        pdfGraphics.setFillColor(strokeColor);
+                        pdfGraphics.fillPath();
+                      } else {
+                        // stroke
+                        pdfGraphics.setStrokeColor(strokeColor);
+                        pdfGraphics.setLineWidth(stroke.options.size);
+                        pdfGraphics.strokePath();
+                      }
                     }
-
-                    if (shouldFillShape) {
-                      // fill
-                      pdfGraphics.setFillColor(strokeColor);
-                      pdfGraphics.fillPath();
-                    } else {
-                      // stroke
-                      pdfGraphics.setStrokeColor(strokeColor);
-                      pdfGraphics.setLineWidth(stroke.options.size);
-                      pdfGraphics.strokePath();
-                    }
-                  }
-                },
-                child: pw.Image(
-                  pw.MemoryImage(pageScreenshots[pageIndex]),
-                  width: pageSize.width,
-                  height: pageSize.height,
+                  },
+                  child: pw.Image(
+                    pw.MemoryImage(screenshot),
+                    width: pageSize.width,
+                    height: pageSize.height,
+                  ),
                 ),
-              ),
-            );
-          },
-        ),
-      );
+              );
+            },
+          ),
+        );
+      }
+
+      onProgress?.call(chunkEnd, coreInfo.pages.length);
+      // Give the event loop time to render the UI updates between heavy chunks
+      await Future.delayed(const Duration(milliseconds: 20));
     }
 
     return pdf;
@@ -141,7 +156,7 @@ abstract class EditorExporter {
     bool rasterizeAllStrokes = false,
     Size? targetSize,
     double? cropHeight,
-    double pixelRatio = 2,
+    double pixelRatio = 1.5,
   }) async {
     final page = coreInfo.pages[pageIndex].cloneForRasterization(
       rasterizeAllStrokes: rasterizeAllStrokes,

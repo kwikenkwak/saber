@@ -28,6 +28,7 @@ class EditorBottomSheet extends StatefulWidget {
     required this.redrawAndSave,
     required this.pickPhotos,
     required this.importPdf,
+    required this.overwritePdfBackgrounds,
     required this.canRasterPdf,
     required this.getIsWatchingServer,
     required this.setIsWatchingServer,
@@ -46,6 +47,7 @@ class EditorBottomSheet extends StatefulWidget {
   final VoidCallback redrawAndSave;
   final Future<int> Function() pickPhotos;
   final Future<bool> Function() importPdf;
+  final Future<bool> Function() overwritePdfBackgrounds;
   final bool canRasterPdf;
   final bool Function() getIsWatchingServer;
   final void Function(bool) setIsWatchingServer;
@@ -313,6 +315,17 @@ class _EditorBottomSheetState extends State<EditorBottomSheet> {
                       }
                     },
                     child: const Text('PDF'),
+                  ),
+                if (widget.canRasterPdf)
+                  ElevatedButton(
+                    onPressed: () async {
+                      final pdfImported = await widget.overwritePdfBackgrounds();
+                      if (pdfImported) {
+                        if (!context.mounted) return;
+                        Navigator.pop(context);
+                      }
+                    },
+                    child: const Text('Overwrite PDF'),
                   ),
               ],
             ),

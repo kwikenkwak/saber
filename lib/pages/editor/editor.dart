@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart' as flutter_quill;
+import 'package:focus_detector/focus_detector.dart';
 import 'package:keybinder/keybinder.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
@@ -160,6 +161,32 @@ class EditorState extends State<Editor> {
     stows.lastTool.value = tool.toolId;
   }
 
+  void _setTool(Tool tool) {
+    setState(() {
+      if (tool is Eraser) {
+        // setTool(Eraser) is called to toggle eraser
+        if (currentTool is Eraser && tmpTool != null) {
+          // switch to previous tool
+          tool = tmpTool!;
+          tmpTool = null;
+        } else {
+          // store previous tool to restore it later
+          tmpTool = currentTool;
+        }
+      }
+
+      currentTool = tool;
+
+      if (currentTool is Highlighter) {
+        Highlighter.currentHighlighter = currentTool as Highlighter;
+      } else if (currentTool is Pencil) {
+        Pencil.currentPencil = currentTool as Pencil;
+      } else if (currentTool is Pen) {
+        Pen.currentPen = currentTool as Pen;
+      }
+    });
+  }
+
   ValueNotifier<SavingState> savingState = ValueNotifier(SavingState.saved);
   Timer? _delayedSaveTimer;
   Timer? _watchServerTimer;
@@ -258,7 +285,7 @@ class EditorState extends State<Editor> {
 
   void _setState() => setState(() {});
 
-  Keybinding? _ctrlZ, _ctrlY, _ctrlShiftZ;
+  Keybinding? _ctrlZ, _ctrlY, _ctrlShiftZ, _pageDown, _pageUp;
   void _assignKeybindings() {
     _ctrlZ = Keybinding([
       KeyCode.ctrl,
@@ -273,15 +300,40 @@ class EditorState extends State<Editor> {
       KeyCode.shift,
       KeyCode.from(LogicalKeyboardKey.keyZ),
     ], inclusive: true);
+    _pageDown = Keybinding([
+      KeyCode.from(LogicalKeyboardKey.pageDown),
+    ], inclusive: true);
+    _pageUp = Keybinding([
+      KeyCode.from(LogicalKeyboardKey.pageUp),
+    ], inclusive: true);
+
     Keybinder.bind(_ctrlZ!, undo);
     Keybinder.bind(_ctrlY!, redo);
     Keybinder.bind(_ctrlShiftZ!, redo);
+
+    Keybinder.bind(_pageDown!, () {
+      if (currentTool is Eraser) {
+        _setTool(Pen.currentPen);
+      } else {
+        _setTool(Eraser());
+      }
+    });
+
+    Keybinder.bind(_pageUp!, () {
+      if (currentTool is Highlighter) {
+        _setTool(Pen.currentPen);
+      } else {
+        _setTool(Highlighter.currentHighlighter);
+      }
+    });
   }
 
   void _removeKeybindings() {
     if (_ctrlZ != null) Keybinder.remove(_ctrlZ!);
     if (_ctrlY != null) Keybinder.remove(_ctrlY!);
     if (_ctrlShiftZ != null) Keybinder.remove(_ctrlShiftZ!);
+    if (_pageDown != null) Keybinder.remove(_pageDown!);
+    if (_pageUp != null) Keybinder.remove(_pageUp!);
   }
 
   /// Creates pages until the given page index exists,
@@ -438,6 +490,19 @@ class EditorState extends State<Editor> {
           for (final stroke in item.strokes) {
             stroke.color = item.colorChange![stroke]!.previous;
           }
+        case .changeBackgrounds:
+          if (item.insertedPages != null) {
+            for (final page in item.insertedPages!) {
+              coreInfo.pages.remove(page);
+            }
+          }
+          if (item.oldBackgrounds != null) {
+            for (final entry in item.oldBackgrounds!.entries) {
+              if (entry.key < coreInfo.pages.length) {
+                coreInfo.pages[entry.key].backgroundImage = entry.value;
+              }
+            }
+          }
       }
 
       if (item.type != .move) {
@@ -484,6 +549,19 @@ class EditorState extends State<Editor> {
             ),
           ),
         );
+      case .changeBackgrounds:
+        setState(() {
+          if (item.insertedPages != null) {
+            coreInfo.pages.addAll(item.insertedPages!);
+          }
+          if (item.newBackgrounds != null) {
+            for (final entry in item.newBackgrounds!.entries) {
+              if (entry.key < coreInfo.pages.length) {
+                coreInfo.pages[entry.key].backgroundImage = entry.value;
+              }
+            }
+          }
+        });
     }
   }
 
@@ -953,8 +1031,8 @@ class EditorState extends State<Editor> {
                   awaitWrite: true,
                 ),
               ),
-        FileManager.removeUnusedAssets(filePath, numAssets: assets.length),
       ]);
+      await FileManager.removeUnusedAssets(filePath, numAssets: assets.length);
       savingState.value = .saved;
       history.markLastChangeAsSaved();
     } catch (e) {
@@ -1243,6 +1321,127 @@ class EditorState extends State<Editor> {
     return true;
   }
 
+  Future<bool> overwritePdfBackgrounds() async {
+    if (coreInfo.readOnly) return false;
+    if (!Editor.canRasterPdf) return false;
+
+    final FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      allowMultiple: false,
+      withData: false,
+    );
+    if (result == null) return false;
+
+    final PlatformFile file = result.files.single;
+    final path = file.path!;
+    final pdfDocument = await coreInfo.assetCache.pdfDocumentCache.load(path);
+
+    int pdfIndex = 0;
+    int noteIndex = 0;
+
+    final Map<int, EditorImage?> oldBackgrounds = {};
+    final Map<int, EditorImage?> newBackgrounds = {};
+    final List<EditorPage> insertedPages = [];
+
+    // Replace or insert pages based on PDF
+    while (pdfIndex < pdfDocument.pages.length) {
+      final pdfPage = pdfDocument.pages[pdfIndex];
+      assert(pdfPage.pageNumber >= 1, 'pdfrx page numbers start at 1');
+
+      final pageSize = Size(
+        EditorPage.defaultWidth,
+        EditorPage.defaultWidth * pdfPage.height / pdfPage.width,
+      );
+
+      if (noteIndex < coreInfo.pages.length) {
+        final existingPage = coreInfo.pages[noteIndex];
+        // If height > width, this is considered an "A4/manually inserted" page. Skip overwriting it.
+        if (existingPage.size.height > existingPage.size.width) {
+          noteIndex++;
+          // Do not increment pdfIndex; map this pdfPage to the next note page.
+          continue;
+        }
+
+        final pdfImage = PdfEditorImage(
+          id: coreInfo.nextImageId++,
+          pdfBytes: null,
+          pdfFile: File(path),
+          pdfPage: pdfPage.pageNumber - 1,
+          pageIndex: noteIndex,
+          pageSize: pageSize,
+          naturalSize: pdfPage.size,
+          onMoveImage: onMoveImage,
+          onDeleteImage: onDeleteImage,
+          onMiscChange: autosaveAfterDelay,
+          onLoad: () => setState(() {}),
+          assetCache: coreInfo.assetCache,
+        );
+
+        oldBackgrounds[noteIndex] = existingPage.backgroundImage;
+        newBackgrounds[noteIndex] = pdfImage;
+        existingPage.backgroundImage = pdfImage;
+
+        noteIndex++;
+        pdfIndex++;
+      } else {
+        // Insert new page if the PDF has more pages than the previous note
+        final pdfImage = PdfEditorImage(
+          id: coreInfo.nextImageId++,
+          pdfBytes: null,
+          pdfFile: File(path),
+          pdfPage: pdfPage.pageNumber - 1,
+          pageIndex: noteIndex,
+          pageSize: pageSize,
+          naturalSize: pdfPage.size,
+          onMoveImage: onMoveImage,
+          onDeleteImage: onDeleteImage,
+          onMiscChange: autosaveAfterDelay,
+          onLoad: () => setState(() {}),
+          assetCache: coreInfo.assetCache,
+        );
+
+        final page = EditorPage(size: pageSize);
+        page.backgroundImage = pdfImage;
+        coreInfo.pages.add(page);
+        insertedPages.add(page);
+
+        noteIndex++;
+        pdfIndex++;
+      }
+    }
+
+    // Remove backgrounds from any extra pages that don't map to the new PDF
+    while (noteIndex < coreInfo.pages.length) {
+      final existingPage = coreInfo.pages[noteIndex];
+      // Skip manually inserted A4-like pages
+      if (existingPage.size.height <= existingPage.size.width) {
+        if (existingPage.backgroundImage is PdfEditorImage) {
+          oldBackgrounds[noteIndex] = existingPage.backgroundImage;
+          newBackgrounds[noteIndex] = null;
+          existingPage.backgroundImage = null;
+        }
+      }
+      noteIndex++;
+    }
+
+    history.recordChange(
+      EditorHistoryItem(
+        type: .changeBackgrounds,
+        pageIndex: 0,
+        strokes: const [],
+        images: const [],
+        oldBackgrounds: oldBackgrounds,
+        newBackgrounds: newBackgrounds,
+        insertedPages: insertedPages.isNotEmpty ? insertedPages : null,
+      ),
+    );
+
+    if (mounted) setState(() {});
+    autosaveAfterDelay();
+    return true;
+  }
+
   Future paste() async {
     /// Maps image formats to their file extension.
     const Map<SimpleFileFormat, String> formats = {
@@ -1298,8 +1497,15 @@ class EditorState extends State<Editor> {
     await _pickPhotos(photoInfos);
   }
 
-  Future exportAsPdf(BuildContext context) async {
-    final pdf = await EditorExporter.generatePdf(coreInfo, context);
+  Future exportAsPdf(
+    BuildContext context, {
+    void Function(int, int)? onProgress,
+  }) async {
+    final pdf = await EditorExporter.generatePdf(
+      coreInfo,
+      context,
+      onProgress: onProgress,
+    );
     final bytes = await pdf.save();
     if (!context.mounted) return;
     await FileManager.exportFile(
@@ -1310,8 +1516,14 @@ class EditorState extends State<Editor> {
   }
 
   /// Exports the current note as an SBA (Saber Archive) file.
-  Future exportAsSba(BuildContext context) async {
-    final sba = await coreInfo.saveToSba(currentPageIndex: currentPageIndex);
+  Future exportAsSba(
+    BuildContext context, {
+    void Function(int, int)? onProgress,
+  }) async {
+    final sba = await coreInfo.saveToSba(
+      currentPageIndex: currentPageIndex,
+      onProgress: onProgress,
+    );
     if (!context.mounted) return;
     await FileManager.exportFile(
       '${coreInfo.fileName}.sba',
@@ -1384,31 +1596,7 @@ class EditorState extends State<Editor> {
         bottom: stows.editorToolbarAlignment.value != AxisDirection.up,
         child: Toolbar(
           readOnly: coreInfo.readOnly,
-          setTool: (tool) {
-            setState(() {
-              if (tool is Eraser) {
-                // setTool(Eraser) is called to toggle eraser
-                if (currentTool is Eraser && tmpTool != null) {
-                  // switch to previous tool
-                  tool = tmpTool!;
-                  tmpTool = null;
-                } else {
-                  // store previous tool to restore it later
-                  tmpTool = currentTool;
-                }
-              }
-
-              currentTool = tool;
-
-              if (currentTool is Highlighter) {
-                Highlighter.currentHighlighter = currentTool as Highlighter;
-              } else if (currentTool is Pencil) {
-                Pencil.currentPencil = currentTool as Pencil;
-              } else if (currentTool is Pen) {
-                Pen.currentPen = currentTool as Pen;
-              }
-            });
-          },
+          setTool: _setTool,
           currentTool: currentTool,
           duplicateSelection: () {
             final select = currentTool as Select;
@@ -1610,95 +1798,105 @@ class EditorState extends State<Editor> {
           child: child!,
         );
       },
-      child: Scaffold(
-        appBar: DynamicMaterialApp.isFullscreen
-            ? null
-            : AppBar(
-                toolbarHeight: kToolbarHeight,
-                title: widget.customTitle != null
-                    ? Text(widget.customTitle!)
-                    : Form(
-                        key: _filenameFormKey,
-                        autovalidateMode: AutovalidateMode.onUserInteraction,
-                        child: TextFormField(
-                          decoration: const InputDecoration(
-                            border: InputBorder.none,
+      child: FocusDetector(
+        onFocusGained: () {
+          // Key bindings won't work until keyboard is shown at least once for some reason.
+          // This is a workaround to fix that. It should be unnoticable to the user.
+          if (Platform.isAndroid) {
+            SystemChannels.textInput.invokeMethod('TextInput.show');
+            SystemChannels.textInput.invokeMethod('TextInput.hide');
+          }
+        },
+        child: Scaffold(
+          appBar: DynamicMaterialApp.isFullscreen
+              ? null
+              : AppBar(
+                  toolbarHeight: kToolbarHeight,
+                  title: widget.customTitle != null
+                      ? Text(widget.customTitle!)
+                      : Form(
+                          key: _filenameFormKey,
+                          autovalidateMode: AutovalidateMode.onUserInteraction,
+                          child: TextFormField(
+                            decoration: const InputDecoration(
+                              border: InputBorder.none,
+                            ),
+                            controller: filenameTextEditingController,
+                            onChanged: renameFile,
+                            autofocus: needsNaming,
+                            validator: _validateFilenameTextField,
                           ),
-                          controller: filenameTextEditingController,
-                          onChanged: renameFile,
-                          autofocus: needsNaming,
-                          validator: _validateFilenameTextField,
                         ),
+                  leading: SaveIndicator(
+                    savingState: savingState,
+                    triggerSave: saveToFile,
+                  ),
+                  actions: [
+                    IconButton(
+                      icon: const AdaptiveIcon(
+                        icon: Icons.insert_page_break,
+                        cupertinoIcon: CupertinoIcons.add,
                       ),
-                leading: SaveIndicator(
-                  savingState: savingState,
-                  triggerSave: saveToFile,
+                      tooltip: t.editor.menu.insertPage,
+                      onPressed: () => setState(() {
+                        final currentPageIndex = this.currentPageIndex;
+                        insertPageAfter(currentPageIndex);
+                        CanvasGestureDetector.scrollToPage(
+                          pageIndex: currentPageIndex + 1,
+                          pages: coreInfo.pages,
+                          screenWidth: MediaQuery.sizeOf(context).width,
+                          transformationController: _transformationController,
+                        );
+                      }),
+                    ),
+                    IconButton(
+                      icon: const AdaptiveIcon(
+                        icon: Icons.grid_view,
+                        cupertinoIcon: CupertinoIcons.rectangle_grid_2x2,
+                      ),
+                      tooltip: t.editor.pages,
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) => AdaptiveAlertDialog(
+                            title: Text(t.editor.pages),
+                            content: pageManager(context),
+                            actions: const [],
+                          ),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const AdaptiveIcon(
+                        icon: Icons.more_vert,
+                        cupertinoIcon: CupertinoIcons.ellipsis_vertical,
+                      ),
+                      onPressed: () {
+                        showModalBottomSheet(
+                          context: context,
+                          builder: (context) => bottomSheet(context),
+                          isScrollControlled: true,
+                          showDragHandle: true,
+                          backgroundColor: colorScheme.surface,
+                          constraints: const BoxConstraints(maxWidth: 500),
+                        );
+                      },
+                    ),
+                  ],
                 ),
-                actions: [
-                  IconButton(
-                    icon: const AdaptiveIcon(
-                      icon: Icons.insert_page_break,
-                      cupertinoIcon: CupertinoIcons.add,
-                    ),
-                    tooltip: t.editor.menu.insertPage,
-                    onPressed: () => setState(() {
-                      final currentPageIndex = this.currentPageIndex;
-                      insertPageAfter(currentPageIndex);
-                      CanvasGestureDetector.scrollToPage(
-                        pageIndex: currentPageIndex + 1,
-                        pages: coreInfo.pages,
-                        screenWidth: MediaQuery.sizeOf(context).width,
-                        transformationController: _transformationController,
-                      );
-                    }),
-                  ),
-                  IconButton(
-                    icon: const AdaptiveIcon(
-                      icon: Icons.grid_view,
-                      cupertinoIcon: CupertinoIcons.rectangle_grid_2x2,
-                    ),
-                    tooltip: t.editor.pages,
-                    onPressed: () {
-                      showDialog(
-                        context: context,
-                        builder: (context) => AdaptiveAlertDialog(
-                          title: Text(t.editor.pages),
-                          content: pageManager(context),
-                          actions: const [],
-                        ),
-                      );
-                    },
-                  ),
-                  IconButton(
-                    icon: const AdaptiveIcon(
-                      icon: Icons.more_vert,
-                      cupertinoIcon: CupertinoIcons.ellipsis_vertical,
-                    ),
-                    onPressed: () {
-                      showModalBottomSheet(
-                        context: context,
-                        builder: (context) => bottomSheet(context),
-                        isScrollControlled: true,
-                        showDragHandle: true,
-                        backgroundColor: colorScheme.surface,
-                        constraints: const BoxConstraints(maxWidth: 500),
-                      );
-                    },
-                  ),
-                ],
-              ),
-        body: body,
-        floatingActionButton:
-            (DynamicMaterialApp.isFullscreen &&
-                !stows.editorToolbarShowInFullscreen.value)
-            ? FloatingActionButton(
-                shape: platform.isCupertino ? const CircleBorder() : null,
-                onPressed: () {
-                  DynamicMaterialApp.setFullscreen(false, updateSystem: true);
-                },
-                child: const Icon(Icons.fullscreen_exit),
-              )
-            : null,
+          body: body,
+          floatingActionButton:
+              (DynamicMaterialApp.isFullscreen &&
+                  !stows.editorToolbarShowInFullscreen.value)
+              ? FloatingActionButton(
+                  shape: platform.isCupertino ? const CircleBorder() : null,
+                  onPressed: () {
+                    DynamicMaterialApp.setFullscreen(false, updateSystem: true);
+                  },
+                  child: const Icon(Icons.fullscreen_exit),
+                )
+              : null,
+        ),
       ),
     );
   }
@@ -1758,6 +1956,7 @@ class EditorState extends State<Editor> {
       }),
       pickPhotos: _pickPhotos,
       importPdf: importPdf,
+      overwritePdfBackgrounds: overwritePdfBackgrounds,
       canRasterPdf: Editor.canRasterPdf,
       getIsWatchingServer: () => _watchServerTimer?.isActive ?? false,
       setIsWatchingServer: (bool watch) {

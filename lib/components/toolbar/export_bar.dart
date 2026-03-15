@@ -17,9 +17,9 @@ class ExportBar extends StatefulWidget {
 
   final VoidCallback toggleExportBar;
 
-  final Future Function(BuildContext)? exportAsSba;
-  final Future Function(BuildContext)? exportAsPdf;
-  final Future Function(BuildContext)? exportAsPng;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsSba;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsPdf;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsPng;
 
   @override
   State<ExportBar> createState() => _ExportBarState();
@@ -28,31 +28,43 @@ class ExportBar extends StatefulWidget {
 class _ExportBarState extends State<ExportBar> {
   /// The current export function being executed.
   /// If this is null, no export is being executed.
-  Future Function(BuildContext)? _currentlyExporting;
+  Future Function(BuildContext, {void Function(int, int)? onProgress})? _currentlyExporting;
+  String? _exportProgress;
 
   void Function()? _onPressed(
-    Future Function(BuildContext)? exportFunction,
+    Future Function(BuildContext, {void Function(int, int)? onProgress})? exportFunction,
     BuildContext context,
   ) {
     if (_currentlyExporting != null) return null;
     if (exportFunction == null) return null;
     return () {
-      setState(() => _currentlyExporting = exportFunction);
-      exportFunction(context).then((_) {
+      setState(() {
+        _currentlyExporting = exportFunction;
+        _exportProgress = null;
+      });
+      exportFunction(context, onProgress: (current, total) {
+        setState(() {
+          _exportProgress = '$current / $total';
+        });
+      }).then((_) {
         widget.toggleExportBar();
-        setState(() => _currentlyExporting = null);
+        setState(() {
+          _currentlyExporting = null;
+          _exportProgress = null;
+        });
       });
     };
   }
 
   Widget _buttonChild(
-    Future Function(BuildContext)? exportFunction,
+    Future Function(BuildContext, {void Function(int, int)? onProgress})? exportFunction,
     String text,
   ) {
     if (exportFunction == null || _currentlyExporting != exportFunction) {
       return Text(text);
     } else {
-      // if this is currently exporting, show a loading icon
+      // if this is currently exporting, show progress
+      if (_exportProgress != null) return Text(_exportProgress!);
       return AdaptiveCircularProgressIndicator.textStyled(alpha: 0.4);
     }
   }

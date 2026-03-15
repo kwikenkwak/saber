@@ -76,9 +76,9 @@ class Toolbar extends StatefulWidget {
   final VoidCallback duplicateSelection;
   final VoidCallback deleteSelection;
 
-  final Future Function(BuildContext)? exportAsSba;
-  final Future Function(BuildContext)? exportAsPdf;
-  final Future Function(BuildContext)? exportAsPng;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsSba;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsPdf;
+  final Future Function(BuildContext, {void Function(int, int)? onProgress})? exportAsPng;
 
   @override
   State<Toolbar> createState() => _ToolbarState();

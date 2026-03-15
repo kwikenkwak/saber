@@ -102,6 +102,16 @@ class OrderedAssetCache {
         index = i;
         break;
       }
+    } else if (index == -1 && value is File) {
+      // Files need to be compared by path
+      for (int i = 0; i < _cache.length; i++) {
+        final cacheItem = _cache[i];
+        if (cacheItem is! File) continue;
+        if (value.path == cacheItem.path) {
+          index = i;
+          break;
+        }
+      }
     }
     log.fine('OrderedAssetCache.add: index = $index, value = $value');
 
@@ -125,13 +135,23 @@ class OrderedAssetCache {
     if (item is List<int>) {
       return item;
     } else if (item is File) {
-      return item.readAsBytes();
+      try {
+        if (item.existsSync()) return await item.readAsBytes();
+      } catch (e) {
+        log.warning('OrderedAssetCache.getBytes: could not read file ${item.path}: $e');
+      }
+      return <int>[];
     } else if (item is String) {
       return utf8.encode(item);
     } else if (item is MemoryImage) {
       return item.bytes;
     } else if (item is FileImage) {
-      return item.file.readAsBytes();
+      try {
+        if (item.file.existsSync()) return await item.file.readAsBytes();
+      } catch (e) {
+        log.warning('OrderedAssetCache.getBytes: could not read fileImage ${item.file.path}: $e');
+      }
+      return <int>[];
     } else {
       throw Exception(
         'OrderedAssetCache.getBytes: unknown type ${item.runtimeType}',

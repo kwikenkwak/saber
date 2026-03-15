@@ -1,3 +1,4 @@
+/// 🤖 Generated wholely or partially with GitHub Copilot; Gemini 3.1 Pro (Preview)
 import 'dart:io';
 
 import 'package:collapsible/collapsible.dart';
@@ -557,6 +558,16 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 SettingsSubtitle(subtitle: t.settings.prefCategories.advanced),
                 if (isSentryAvailable) const SettingsSentryConsent(),
+                SettingsDropdown<int>(
+                  title: 'Export Parallelism',
+                  subtitle: 'Amount of concurrent tasks when exporting. Very high numbers may drain all memory and crash.',
+                  icon: cupertino ? CupertinoIcons.bolt : Icons.bolt,
+                  pref: stows.exportParallelism,
+                  options: [
+                    for (int i = 1; i <= 20; i++)
+                      ToggleButtonsOption(i, Text('$i')),
+                  ],
+                ),
                 if (Platform.isAndroid)
                   SettingsDirectorySelector(
                     title: t.settings.prefLabels.customDataDir,

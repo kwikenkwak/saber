@@ -492,25 +492,38 @@ class EditorCoreInfo {
   ///
   /// If [currentPageIndex] isn't null,
   /// [initialPageIndex] will be updated to it before saving.
-  Future<List<int>> saveToSba({required int? currentPageIndex}) async {
+  Future<List<int>> saveToSba({
+    required int? currentPageIndex,
+    void Function(int current, int total)? onProgress,
+  }) async {
     final (bson, assets) = saveToBinary(currentPageIndex: currentPageIndex);
     const filePath = 'main${Editor.extension}';
 
     final archive = Archive();
     archive.addFile(ArchiveFile(filePath, bson.length, bson));
 
-    await Future.wait([
-      for (int i = 0; i < assets.length; ++i)
-        assets
-            .getBytes(i)
-            .then(
-              (bytes) => archive.addFile(
-                ArchiveFile('$filePath.$i', bytes.length, bytes),
-              ),
-            ),
-    ]);
+    final int concurrency = stows.exportParallelism.value.clamp(1, 20);
 
-    return ZipEncoder().encode(archive);
+    for (int chunkStart = 0; chunkStart < assets.length; chunkStart += concurrency) {
+      final chunkEnd = (chunkStart + concurrency < assets.length)
+          ? chunkStart + concurrency
+          : assets.length;
+
+      final bytesList = await Future.wait([
+        for (int i = chunkStart; i < chunkEnd; ++i) assets.getBytes(i),
+      ]);
+
+      for (int i = 0; i < bytesList.length; ++i) {
+        final index = chunkStart + i;
+        final bytes = bytesList[i];
+        archive.addFile(ArchiveFile('$filePath.$index', bytes.length, bytes));
+      }
+
+      onProgress?.call(chunkEnd, assets.length);
+      await Future.delayed(const Duration(milliseconds: 10)); // allow UI update
+    }
+
+    return await compute(ZipEncoder().encode, archive);
   }
 
   /// Returns the bson bytes and the assets.

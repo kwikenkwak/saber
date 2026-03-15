@@ -1,3 +1,4 @@
+/// 🤖 Generated wholely or partially with GitHub Copilot; Gemini 3.1 Pro (Preview)
 import 'dart:async';
 import 'dart:io';
 
@@ -387,6 +388,12 @@ class Stows {
   );
 
   final locale = PlainStow('locale', '', volatile: !_isOnMainIsolate);
+
+  final exportParallelism = PlainStow(
+    'exportParallelism',
+    1,
+    volatile: !_isOnMainIsolate,
+  );
 
   final sentryConsent = PlainStow(
     'sentryConsent',
